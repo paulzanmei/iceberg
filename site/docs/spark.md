@@ -89,6 +89,16 @@ Spark's built-in catalog supports existing v1 and v2 tables tracked in a Hive Me
 
 This configuration can use same Hive Metastore for both Iceberg and non-Iceberg tables.
 
+### Loading a custom catalog
+
+Spark supports loading a custom Iceberg `Catalog` implementation by specifying the `catalog-impl` property.
+When `catalog-impl` is set, the value of `type` is ignored. Here is an example:
+
+```plain
+spark.sql.catalog.custom_prod = org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.custom_prod.catalog-impl = com.my.custom.CatalogImpl
+spark.sql.catalog.custom_prod.my-additional-catalog-config = my-value
+```
 
 ## DDL commands
 
@@ -314,6 +324,21 @@ spark.read
     in [Spark 3.1 - SPARK-32592](https://issues.apache.org/jira/browse/SPARK-32592).
 
 Time travel is not yet supported by Spark's SQL syntax.
+
+### Table names and paths
+
+Paths and table names can be loaded from the Spark3 dataframe interface. How paths/tables are loaded depends on how
+the identifier is specified. When using `spark.read().format("iceberg").path(table)` or `spark.table(table)` the `table`
+variable can take a number of forms as listed below:
+
+*  `file:/path/to/table` -> loads a HadoopTable at given path
+*  `tablename` -> loads `currentCatalog.currentNamespace.tablename`
+*  `catalog.tablename` -> load `tablename` from the specified catalog.
+*  `namespace.tablename` -> load `namespace.tablename` from current catalog
+*  `catalog.namespace.tablename` -> load `namespace.tablename` from the specified catalog.
+*  `namespace1.namespace2.tablename` -> load `namespace1.namespace2.tablename` from current catalog
+
+The above list is in order of priority. For example: a matching catalog will take priority over any namespace resolution.
 
 ### Spark 2.4
 

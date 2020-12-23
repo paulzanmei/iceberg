@@ -63,13 +63,10 @@ public class FlinkCatalogFactory implements CatalogFactory {
   public static final String ICEBERG_CATALOG_TYPE_HADOOP = "hadoop";
   public static final String ICEBERG_CATALOG_TYPE_HIVE = "hive";
 
-  public static final String HIVE_URI = "uri";
-  public static final String HIVE_CLIENT_POOL_SIZE = "clients";
   public static final String HIVE_CONF_DIR = "hive-conf-dir";
-  public static final String WAREHOUSE_LOCATION = "warehouse";
-
   public static final String DEFAULT_DATABASE = "default-database";
   public static final String BASE_NAMESPACE = "base-namespace";
+  public static final String CACHE_ENABLED = "cache-enabled";
 
   /**
    * Create an Iceberg {@link org.apache.iceberg.catalog.Catalog} loader to be used by this Flink catalog adapter.
@@ -90,16 +87,12 @@ public class FlinkCatalogFactory implements CatalogFactory {
       case ICEBERG_CATALOG_TYPE_HIVE:
         // The values of properties 'uri', 'warehouse', 'hive-conf-dir' are allowed to be null, in that case it will
         // fallback to parse those values from hadoop configuration which is loaded from classpath.
-        String uri = properties.get(HIVE_URI);
-        String warehouse = properties.get(WAREHOUSE_LOCATION);
-        int clientPoolSize = Integer.parseInt(properties.getOrDefault(HIVE_CLIENT_POOL_SIZE, "2"));
         String hiveConfDir = properties.get(HIVE_CONF_DIR);
         Configuration newHadoopConf = mergeHiveConf(hadoopConf, hiveConfDir);
-        return CatalogLoader.hive(name, newHadoopConf, uri, warehouse, clientPoolSize);
+        return CatalogLoader.hive(name, newHadoopConf, properties);
 
       case ICEBERG_CATALOG_TYPE_HADOOP:
-        String warehouseLocation = properties.get(WAREHOUSE_LOCATION);
-        return CatalogLoader.hadoop(name, hadoopConf, warehouseLocation);
+        return CatalogLoader.hadoop(name, hadoopConf, properties);
 
       default:
         throw new UnsupportedOperationException("Unknown catalog type: " + catalogType);
@@ -118,12 +111,14 @@ public class FlinkCatalogFactory implements CatalogFactory {
   public List<String> supportedProperties() {
     List<String> properties = Lists.newArrayList();
     properties.add(ICEBERG_CATALOG_TYPE);
-    properties.add(HIVE_URI);
-    properties.add(HIVE_CLIENT_POOL_SIZE);
     properties.add(HIVE_CONF_DIR);
-    properties.add(WAREHOUSE_LOCATION);
     properties.add(DEFAULT_DATABASE);
     properties.add(BASE_NAMESPACE);
+    properties.add(CatalogProperties.FILE_IO_IMPL);
+    properties.add(CatalogProperties.WAREHOUSE_LOCATION);
+    properties.add(CatalogProperties.HIVE_URI);
+    properties.add(CatalogProperties.HIVE_CLIENT_POOL_SIZE);
+    properties.add(CACHE_ENABLED);
     return properties;
   }
 
@@ -138,7 +133,7 @@ public class FlinkCatalogFactory implements CatalogFactory {
     String[] baseNamespace = properties.containsKey(BASE_NAMESPACE) ?
         Splitter.on('.').splitToList(properties.get(BASE_NAMESPACE)).toArray(new String[0]) :
         new String[0];
-    boolean cacheEnabled = Boolean.parseBoolean(properties.getOrDefault("cache-enabled", "true"));
+    boolean cacheEnabled = Boolean.parseBoolean(properties.getOrDefault(CACHE_ENABLED, "true"));
     return new FlinkCatalog(name, defaultDatabase, baseNamespace, catalogLoader, cacheEnabled);
   }
 

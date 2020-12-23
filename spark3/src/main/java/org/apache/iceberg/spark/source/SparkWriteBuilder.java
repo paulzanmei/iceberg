@@ -20,6 +20,7 @@
 package org.apache.iceberg.spark.source;
 
 import java.util.Locale;
+import org.apache.iceberg.IsolationLevel;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.encryption.EncryptionManager;
@@ -34,6 +35,7 @@ import org.apache.iceberg.types.TypeUtil;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.BatchWrite;
 import org.apache.spark.sql.connector.write.LogicalWriteInfo;
 import org.apache.spark.sql.connector.write.SupportsDynamicOverwrite;
@@ -48,13 +50,16 @@ class SparkWriteBuilder implements WriteBuilder, SupportsDynamicOverwrite, Suppo
 
   private final SparkSession spark;
   private final Table table;
-  private final String writeQueryId;
+  private final LogicalWriteInfo writeInfo;
   private final StructType dsSchema;
   private final CaseInsensitiveStringMap options;
   private final String overwriteMode;
   private boolean overwriteDynamic = false;
   private boolean overwriteByFilter = false;
   private Expression overwriteExpr = null;
+  private boolean overwriteFiles = false;
+  private SparkMergeScan mergeScan = null;
+  private IsolationLevel isolationLevel = null;
 
   // lazy variables
   private JavaSparkContext lazySparkContext = null;
@@ -62,7 +67,7 @@ class SparkWriteBuilder implements WriteBuilder, SupportsDynamicOverwrite, Suppo
   SparkWriteBuilder(SparkSession spark, Table table, LogicalWriteInfo info) {
     this.spark = spark;
     this.table = table;
-    this.writeQueryId = info.queryId();
+    this.writeInfo = info;
     this.dsSchema = info.schema();
     this.options = info.options();
     this.overwriteMode = options.containsKey("overwrite-mode") ?
@@ -76,15 +81,27 @@ class SparkWriteBuilder implements WriteBuilder, SupportsDynamicOverwrite, Suppo
     return lazySparkContext;
   }
 
+  public WriteBuilder overwriteFiles(Scan scan, IsolationLevel writeIsolationLevel) {
+    Preconditions.checkArgument(scan instanceof SparkMergeScan, "%s is not SparkMergeScan", scan);
+    Preconditions.checkState(!overwriteByFilter, "Cannot overwrite individual files and by filter");
+    Preconditions.checkState(!overwriteDynamic, "Cannot overwrite individual files and dynamically");
+    this.overwriteFiles = true;
+    this.mergeScan = (SparkMergeScan) scan;
+    this.isolationLevel = writeIsolationLevel;
+    return this;
+  }
+
   @Override
   public WriteBuilder overwriteDynamicPartitions() {
     Preconditions.checkState(!overwriteByFilter, "Cannot overwrite dynamically and by filter: %s", overwriteExpr);
+    Preconditions.checkState(!overwriteFiles, "Cannot overwrite individual files and dynamically");
     this.overwriteDynamic = true;
     return this;
   }
 
   @Override
   public WriteBuilder overwrite(Filter[] filters) {
+    Preconditions.checkState(!overwriteFiles, "Cannot overwrite individual files and using filters");
     this.overwriteExpr = SparkFilters.convert(filters);
     if (overwriteExpr == Expressions.alwaysTrue() && "dynamic".equals(overwriteMode)) {
       // use the write option to override truncating the table. use dynamic overwrite instead.
@@ -113,9 +130,16 @@ class SparkWriteBuilder implements WriteBuilder, SupportsDynamicOverwrite, Suppo
     Broadcast<FileIO> io = lazySparkContext().broadcast(SparkUtil.serializableFileIO(table));
     Broadcast<EncryptionManager> encryptionManager = lazySparkContext().broadcast(table.encryption());
 
-    return new SparkBatchWrite(
-        table, io, encryptionManager, options, overwriteDynamic, overwriteByFilter, overwriteExpr, appId, wapId,
-        writeSchema, dsSchema);
+    SparkWrite write = new SparkWrite(table, io, encryptionManager, writeInfo, appId, wapId, writeSchema, dsSchema);
+    if (overwriteByFilter) {
+      return write.asOverwriteByFilter(overwriteExpr);
+    } else if (overwriteDynamic) {
+      return write.asDynamicOverwrite();
+    } else if (overwriteFiles) {
+      return write.asCopyOnWriteMergeWrite(mergeScan, isolationLevel);
+    } else {
+      return write.asBatchAppend();
+    }
   }
 
   @Override
@@ -141,8 +165,12 @@ class SparkWriteBuilder implements WriteBuilder, SupportsDynamicOverwrite, Suppo
     Broadcast<FileIO> io = lazySparkContext().broadcast(SparkUtil.serializableFileIO(table));
     Broadcast<EncryptionManager> encryptionManager = lazySparkContext().broadcast(table.encryption());
 
-    return new SparkStreamingWrite(
-        table, io, encryptionManager, options, overwriteByFilter, writeQueryId, appId, wapId, writeSchema, dsSchema);
+    SparkWrite write = new SparkWrite(table, io, encryptionManager, writeInfo, appId, wapId, writeSchema, dsSchema);
+    if (overwriteByFilter) {
+      return write.asStreamingOverwrite();
+    } else {
+      return write.asStreamingAppend();
+    }
   }
 
   private static boolean checkNullability(SparkSession spark, CaseInsensitiveStringMap options) {

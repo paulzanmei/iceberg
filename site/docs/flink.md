@@ -69,7 +69,7 @@ export HADOOP_CLASSPATH=`$HADOOP_HOME/bin/hadoop classpath`
 ./bin/sql-client.sh embedded -j <flink-runtime-directory>/iceberg-flink-runtime-xxx.jar shell
 ```
 
-By default, iceberg has included hadoop jars for hadoop catalog. If we want to use hive catalog, we will need to load the hive jars when opening the flink sql client. Fortunately, apache flink has provided a [bundled hive jar](https://ci.apache.org/projects/flink/flink-docs-stable/dev/table/hive/#using-bundled-hive-jar) for sql client. So we could open the sql client
+By default, iceberg has included hadoop jars for hadoop catalog. If we want to use hive catalog, we will need to load the hive jars when opening the flink sql client. Fortunately, apache flink has provided a [bundled hive jar](https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-hive-2.3.6_2.11/1.11.0/flink-sql-connector-hive-2.3.6_2.11-1.11.0.jar) for sql client. So we could open the sql client
 as the following:
 
 ```bash
@@ -88,6 +88,8 @@ export HADOOP_CLASSPATH=`$HADOOP_HOME/bin/hadoop classpath`
 ## Creating catalogs and using catalogs.
 
 Flink 1.11 support to create catalogs by using flink sql.
+
+### Hive catalog
 
 This creates an iceberg catalog named `hive_catalog` that loads tables from a hive metastore:
 
@@ -110,6 +112,8 @@ CREATE CATALOG hive_catalog WITH (
 * `warehouse`: The Hive warehouse location, users should specify this path if neither set the `hive-conf-dir` to specify a location containing a `hive-site.xml` configuration file nor add a correct `hive-site.xml` to classpath.
 * `hive-conf-dir`: Path to a directory containing a `hive-site.xml` configuration file which will be used to provide custom Hive configuration values. The value of `hive.metastore.warehouse.dir` from `<hive-conf-dir>/hive-site.xml` (or hive configure file from classpath) will be overwrote with the `warehouse` value if setting both `hive-conf-dir` and `warehouse` when creating iceberg catalog.
 
+### Hadoop catalog
+
 Iceberg also supports a directory-based catalog in HDFS that can be configured using `'catalog-type'='hadoop'`:
 
 ```sql
@@ -124,6 +128,19 @@ CREATE CATALOG hadoop_catalog WITH (
 * `warehouse`: The HDFS directory to store metadata files and data files. (Required)
 
 We could execute the sql command `USE CATALOG hive_catalog` to set the current catalog.
+
+### Custom catalog
+
+Flink also supports loading a custom Iceberg `Catalog` implementation by specifying the `catalog-impl` property.
+When `catalog-impl` is set, the value of `catalog-type` is ignored. Here is an example:
+
+```sql
+CREATE CATALOG my_catalog WITH (
+  'type'='iceberg',
+  'catalog-impl'='com.my.custom.CatalogImpl',
+  'my-additional-catalog-config'='my-value'
+);
+```
 
 ## DDL commands
 
@@ -193,7 +210,7 @@ DROP TABLE hive_catalog.default.sample;
 Iceberg does not support streaming read in flink now, it's still working in-progress. But it support batch read to scan the existing records in iceberg table.
 
 ```sql
--- Execute the flink job in streaming mode for current session context
+-- Execute the flink job in batch mode for current session context
 SET execution.type = batch ;
 SELECT * FROM sample       ;
 ```
@@ -251,7 +268,7 @@ Iceberg support writing to iceberg table from different DataStream input.
 
 ### Appending data.
 
-we have supported writing `DataStream<RowData>` and `DataStream<Row` to the sink iceberg table natively.
+we have supported writing `DataStream<RowData>` and `DataStream<Row>` to the sink iceberg table natively.
 
 ```java
 StreamExecutionEnvironment env = ...;

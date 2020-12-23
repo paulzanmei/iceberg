@@ -36,6 +36,7 @@ import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.hadoop.HadoopCatalog;
+import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.hive.HiveCatalog;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.base.Splitter;
@@ -54,7 +55,6 @@ import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.NamespaceChange;
 import org.apache.spark.sql.connector.catalog.StagedTable;
-import org.apache.spark.sql.connector.catalog.StagingTableCatalog;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
 import org.apache.spark.sql.connector.catalog.TableChange.ColumnChange;
@@ -78,7 +78,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
  * To use a custom catalog that is not a Hive or Hadoop catalog, extend this class and override
  * {@link #buildIcebergCatalog(String, CaseInsensitiveStringMap)}.
  */
-public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.connector.catalog.SupportsNamespaces {
+public class SparkCatalog extends BaseCatalog {
   private static final Set<String> DEFAULT_NS_KEYS = ImmutableSet.of(TableCatalog.PROP_OWNER);
 
   public static final String ICEBERG_CATALOG_TYPE = "type";
@@ -90,6 +90,7 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
   private boolean cacheEnabled = true;
   private SupportsNamespaces asNamespaceCatalog = null;
   private String[] defaultNamespace = null;
+  private HadoopTables tables;
 
   /**
    * Build an Iceberg {@link Catalog} to be used by this Spark catalog adapter.
@@ -109,13 +110,14 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
     String catalogType = options.getOrDefault(ICEBERG_CATALOG_TYPE, ICEBERG_CATALOG_TYPE_HIVE);
     switch (catalogType.toLowerCase(Locale.ENGLISH)) {
       case ICEBERG_CATALOG_TYPE_HIVE:
-        int clientPoolSize = options.getInt("clients", 2);
-        String uri = options.get("uri");
+        int clientPoolSize = options.getInt(CatalogProperties.HIVE_CLIENT_POOL_SIZE,
+            CatalogProperties.HIVE_CLIENT_POOL_SIZE_DEFAULT);
+        String uri = options.get(CatalogProperties.HIVE_URI);
         return new HiveCatalog(name, uri, clientPoolSize, conf);
 
       case ICEBERG_CATALOG_TYPE_HADOOP:
-        String warehouseLocation = options.get("warehouse");
-        return new HadoopCatalog(name, conf, warehouseLocation);
+        String warehouseLocation = options.get(CatalogProperties.WAREHOUSE_LOCATION);
+        return new HadoopCatalog(name, conf, warehouseLocation, options.asCaseSensitiveMap());
 
       default:
         throw new UnsupportedOperationException("Unknown catalog type: " + catalogType);
@@ -129,13 +131,13 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
    * @return an Iceberg identifier
    */
   protected TableIdentifier buildIdentifier(Identifier identifier) {
-    return TableIdentifier.of(Namespace.of(identifier.namespace()), identifier.name());
+    return Spark3Util.identifierToTableIdentifier(identifier);
   }
 
   @Override
   public SparkTable loadTable(Identifier ident) throws NoSuchTableException {
     try {
-      Table icebergTable = icebergCatalog.loadTable(buildIdentifier(ident));
+      Table icebergTable = load(ident);
       return new SparkTable(icebergTable, !cacheEnabled);
     } catch (org.apache.iceberg.exceptions.NoSuchTableException e) {
       throw new NoSuchTableException(ident);
@@ -148,12 +150,12 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
                                 Map<String, String> properties) throws TableAlreadyExistsException {
     Schema icebergSchema = SparkSchemaUtil.convert(schema);
     try {
-      Table icebergTable = icebergCatalog.createTable(
-          buildIdentifier(ident),
-          icebergSchema,
-          Spark3Util.toPartitionSpec(icebergSchema, transforms),
-          properties.get("location"),
-          Spark3Util.rebuildCreateProperties(properties));
+      Catalog.TableBuilder builder = newBuilder(ident, icebergSchema);
+      Table icebergTable = builder
+          .withPartitionSpec(Spark3Util.toPartitionSpec(icebergSchema, transforms))
+          .withLocation(properties.get("location"))
+          .withProperties(Spark3Util.rebuildCreateProperties(properties))
+          .create();
       return new SparkTable(icebergTable, !cacheEnabled);
     } catch (AlreadyExistsException e) {
       throw new TableAlreadyExistsException(ident);
@@ -165,12 +167,12 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
                                  Map<String, String> properties) throws TableAlreadyExistsException {
     Schema icebergSchema = SparkSchemaUtil.convert(schema);
     try {
-      return new StagedSparkTable(icebergCatalog.newCreateTableTransaction(
-          buildIdentifier(ident),
-          icebergSchema,
-          Spark3Util.toPartitionSpec(icebergSchema, transforms),
-          properties.get("location"),
-          Spark3Util.rebuildCreateProperties(properties)));
+      Catalog.TableBuilder builder = newBuilder(ident, icebergSchema);
+      Transaction transaction = builder.withPartitionSpec(Spark3Util.toPartitionSpec(icebergSchema, transforms))
+          .withLocation(properties.get("location"))
+          .withProperties(Spark3Util.rebuildCreateProperties(properties))
+          .createTransaction();
+      return new StagedSparkTable(transaction);
     } catch (AlreadyExistsException e) {
       throw new TableAlreadyExistsException(ident);
     }
@@ -181,13 +183,12 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
                                   Map<String, String> properties) throws NoSuchTableException {
     Schema icebergSchema = SparkSchemaUtil.convert(schema);
     try {
-      return new StagedSparkTable(icebergCatalog.newReplaceTableTransaction(
-          buildIdentifier(ident),
-          icebergSchema,
-          Spark3Util.toPartitionSpec(icebergSchema, transforms),
-          properties.get("location"),
-          Spark3Util.rebuildCreateProperties(properties),
-          false /* do not create */));
+      Catalog.TableBuilder builder = newBuilder(ident, icebergSchema);
+      Transaction transaction = builder.withPartitionSpec(Spark3Util.toPartitionSpec(icebergSchema, transforms))
+          .withLocation(properties.get("location"))
+          .withProperties(Spark3Util.rebuildCreateProperties(properties))
+          .replaceTransaction();
+      return new StagedSparkTable(transaction);
     } catch (org.apache.iceberg.exceptions.NoSuchTableException e) {
       throw new NoSuchTableException(ident);
     }
@@ -197,13 +198,12 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
   public StagedTable stageCreateOrReplace(Identifier ident, StructType schema, Transform[] transforms,
                                           Map<String, String> properties) {
     Schema icebergSchema = SparkSchemaUtil.convert(schema);
-    return new StagedSparkTable(icebergCatalog.newReplaceTableTransaction(
-        buildIdentifier(ident),
-        icebergSchema,
-        Spark3Util.toPartitionSpec(icebergSchema, transforms),
-        properties.get("location"),
-        Spark3Util.rebuildCreateProperties(properties),
-        true /* create or replace */));
+    Catalog.TableBuilder builder = newBuilder(ident, icebergSchema);
+    Transaction transaction = builder.withPartitionSpec(Spark3Util.toPartitionSpec(icebergSchema, transforms))
+        .withLocation(properties.get("location"))
+        .withProperties(Spark3Util.rebuildCreateProperties(properties))
+        .createOrReplaceTransaction();
+    return new StagedSparkTable(transaction);
   }
 
   @Override
@@ -236,7 +236,7 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
     }
 
     try {
-      Table table = icebergCatalog.loadTable(buildIdentifier(ident));
+      Table table = load(ident);
       commitChanges(table, setLocation, setSnapshotId, pickSnapshotId, propertyChanges, schemaChanges);
     } catch (org.apache.iceberg.exceptions.NoSuchTableException e) {
       throw new NoSuchTableException(ident);
@@ -248,7 +248,9 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
   @Override
   public boolean dropTable(Identifier ident) {
     try {
-      return icebergCatalog.dropTable(buildIdentifier(ident), true);
+      return isPathIdentifier(ident) ?
+          tables.dropTable(((PathIdentifier) ident).location()) :
+          icebergCatalog.dropTable(buildIdentifier(ident));
     } catch (org.apache.iceberg.exceptions.NoSuchTableException e) {
       return false;
     }
@@ -257,6 +259,8 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
   @Override
   public void renameTable(Identifier from, Identifier to) throws NoSuchTableException, TableAlreadyExistsException {
     try {
+      checkNotPathIdentifier(from, "renameTable");
+      checkNotPathIdentifier(to, "renameTable");
       icebergCatalog.renameTable(buildIdentifier(from), buildIdentifier(to));
     } catch (org.apache.iceberg.exceptions.NoSuchTableException e) {
       throw new NoSuchTableException(from);
@@ -268,7 +272,7 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
   @Override
   public void invalidateTable(Identifier ident) {
     try {
-      icebergCatalog.loadTable(buildIdentifier(ident)).refresh();
+      load(ident).refresh();
     } catch (org.apache.iceberg.exceptions.NoSuchTableException ignored) {
       // ignore if the table doesn't exist, it is not cached
     }
@@ -400,6 +404,7 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
     Catalog catalog = buildIcebergCatalog(name, options);
 
     this.catalogName = name;
+    this.tables = new HadoopTables(SparkSession.active().sessionState().newHadoopConf());
     this.icebergCatalog = cacheEnabled ? CachingCatalog.wrap(catalog) : catalog;
     if (catalog instanceof SupportsNamespaces) {
       this.asNamespaceCatalog = (SupportsNamespaces) catalog;
@@ -452,5 +457,28 @@ public class SparkCatalog implements StagingTableCatalog, org.apache.spark.sql.c
     }
 
     transaction.commitTransaction();
+  }
+
+  private static boolean isPathIdentifier(Identifier ident) {
+    return ident instanceof PathIdentifier;
+  }
+
+  private static void checkNotPathIdentifier(Identifier identifier, String method) {
+    if (identifier instanceof PathIdentifier) {
+      throw new IllegalArgumentException(String.format("Cannot pass path based identifier to %s method. %s is a path.",
+          method, identifier));
+    }
+  }
+
+  private Table load(Identifier ident) {
+    return isPathIdentifier(ident) ?
+        tables.load(((PathIdentifier) ident).location()) :
+        icebergCatalog.loadTable(buildIdentifier(ident));
+  }
+
+  private Catalog.TableBuilder newBuilder(Identifier ident, Schema schema) {
+    return isPathIdentifier(ident) ?
+        tables.buildTable(((PathIdentifier) ident).location(), schema) :
+        icebergCatalog.buildTable(buildIdentifier(ident), schema);
   }
 }

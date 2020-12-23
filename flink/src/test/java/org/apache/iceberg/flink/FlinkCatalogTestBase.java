@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.Map;
 import org.apache.flink.util.ArrayUtils;
 import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SupportsNamespaces;
@@ -83,7 +84,7 @@ public abstract class FlinkCatalogTestBase extends FlinkTestBase {
   protected final String[] baseNamespace;
   protected final Catalog validationCatalog;
   protected final SupportsNamespaces validationNamespaceCatalog;
-  private final Map<String, String> config = Maps.newHashMap();
+  protected final Map<String, String> config = Maps.newHashMap();
 
   protected final String flinkDatabase;
   protected final Namespace icebergNamespace;
@@ -104,11 +105,11 @@ public abstract class FlinkCatalogTestBase extends FlinkTestBase {
     }
     if (isHadoopCatalog) {
       config.put(FlinkCatalogFactory.ICEBERG_CATALOG_TYPE, "hadoop");
-      config.put(FlinkCatalogFactory.WAREHOUSE_LOCATION, "file://" + hadoopWarehouse.getRoot());
+      config.put(CatalogProperties.WAREHOUSE_LOCATION, "file://" + hadoopWarehouse.getRoot());
     } else {
       config.put(FlinkCatalogFactory.ICEBERG_CATALOG_TYPE, "hive");
-      config.put(FlinkCatalogFactory.WAREHOUSE_LOCATION, "file://" + hiveWarehouse.getRoot());
-      config.put(FlinkCatalogFactory.HIVE_URI, getURI(hiveConf));
+      config.put(CatalogProperties.WAREHOUSE_LOCATION, "file://" + hiveWarehouse.getRoot());
+      config.put(CatalogProperties.HIVE_URI, getURI(hiveConf));
     }
 
     this.flinkDatabase = catalogName + "." + DATABASE;
